@@ -1,6 +1,6 @@
 import { Schema, model, type InferSchemaType, type HydratedDocument } from "mongoose";
 
-export const SERVICE_LINES = ["App", "FSD"] as const;
+export const SERVICE_LINES = ["App", "FSD", "Both"] as const;
 
 export const RESOURCE_TYPES = [
   "Website",
