@@ -11,6 +11,7 @@ import { categoriesRouter, profileNamesRouter } from "./modules/lookups/lookup.r
 import { meRouter } from "./modules/me/me.routes.js";
 import { projectsRouter } from "./modules/projects/projects.routes.js";
 import { usersRouter } from "./modules/users/users.routes.js";
+import { clientsRouter } from "./modules/clients/clients.routes.js";
 
 export function createApp() {
   const app = express();
@@ -44,6 +45,7 @@ export function createApp() {
   app.use("/api/categories", categoriesRouter);
   app.use("/api/profile-names", profileNamesRouter);
   app.use("/api/projects", projectsRouter);
+  app.use("/api/clients", clientsRouter);
 
   app.use(notFoundHandler);
   app.use(errorHandler);

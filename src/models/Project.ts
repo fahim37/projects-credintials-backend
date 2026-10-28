@@ -59,12 +59,17 @@ const resourceSchema = new Schema(
 
 const projectSchema = new Schema(
   {
-    clientName: { type: String, required: true, trim: true },
+    client: { type: Schema.Types.ObjectId, ref: "Client", required: true, index: true },
+    name: { type: String, required: true, trim: true, maxlength: 120 },
+    // Retained for migration and compatibility with the previous release.
+    clientName: { type: String, trim: true },
     profileName: { type: Schema.Types.ObjectId, ref: "ProfileName", required: true, index: true },
     category: { type: Schema.Types.ObjectId, ref: "Category", required: true, index: true },
     serviceLine: { type: String, enum: SERVICE_LINES, required: true, index: true },
     liveUrl: { type: String, trim: true },
     repoUrl: { type: String, trim: true },
+    liveSites: { type: [{ label: { type: String, required: true }, url: { type: String, required: true } }], default: undefined },
+    repositories: { type: [{ label: { type: String, required: true }, url: { type: String, required: true } }], default: undefined },
     tags: { type: [String], default: [] },
     // Project-wide notes, encrypted like resource notes.
     notes: { type: String },
@@ -76,6 +81,7 @@ const projectSchema = new Schema(
 );
 
 projectSchema.index({ clientName: 1 });
+projectSchema.index({ client: 1, name: 1 });
 projectSchema.index({ tags: 1 });
 projectSchema.index({ updatedAt: -1 });
 projectSchema.index({ "resources.expiresAt": 1 });

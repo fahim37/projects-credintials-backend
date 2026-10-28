@@ -59,3 +59,46 @@ npm run dev               # http://localhost:5000
 
 Resource templates (VPS, MongoDB, Cloudinary, App Store, Stripe, …) live in
 `src/modules/projects/templates.ts` — add one there and it appears in the UI picker.
+
+## Clients and named projects
+
+Clients are shared across profiles. Every project belongs to one client and has its own name,
+live-site links, repository links, and encrypted resources. Approved users can read clients;
+operations and admins can create, rename, and delete them. A client with projects cannot be deleted.
+
+- `GET /api/clients?search=&page=1&limit=12` — paginated client names and project counts.
+- `POST /api/clients` with `{ "name": "Acme" }` — create a client. Names are unique after trimming and lowercasing.
+- `GET /api/clients/:id`, `PATCH /api/clients/:id` with `{ "name": "New name" }`, `DELETE /api/clients/:id`.
+- Project writes require `clientId`, `name`, `liveSites`, and `repositories` alongside the existing project fields.
+  Links use `{ "label": "Admin dashboard", "url": "https://admin.example.com" }`; arrays may be empty.
+  Completely blank link rows are discarded; partial rows and non-HTTP(S) URLs are rejected.
+- Project listing accepts `clientId` and name sorts (`name`, `-name`), and searches link labels and URLs.
+  Client-name sorting joins the current client record before pagination, so renames appear immediately.
+- Legacy read fields (`clientName`, `liveUrl`, `repoUrl`) remain available. Old-form writes return HTTP 409
+  with a refresh message instead of overwriting multiple links.
+
+### Existing-data migration
+
+```bash
+npm run migrate:clients                 # read-only preview
+npm run migrate:clients -- --apply      # apply to the database configured in .env
+```
+
+Back up the configured database before applying the migration and stop application writes while it runs.
+The preview reports groups, proposed project names and link counts without printing credentials.
+Matching names are grouped across profiles; different spellings stay separate. The migration retains
+legacy fields and only sets client references, missing project names, and missing link arrays.
+Project IDs, timestamps, resource IDs and ciphertext are preserved. Re-running it skips completed records.
+Existing empty arrays are preserved, even when an old scalar URL remains on a record.
+
+For a future production rollout, build a separate release first, save matching code and database
+backups, disable API writes, apply the migration, switch the application, and verify health before
+reenabling writes. Rollback must restore both backups before reenabling writes. No deployment is
+performed by the migration command itself.
+
+### Integration checks
+
+`npm test` exercises migration, client/project permissions, multiple links, encryption, searching,
+pagination, client renames, project duplication and reassignment against a disposable database on
+the configured MongoDB server. It never writes fixtures into the application database and removes
+the test database on completion. `npm run typecheck` and `npm run build` check the server code.

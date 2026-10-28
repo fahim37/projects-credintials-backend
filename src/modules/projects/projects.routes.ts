@@ -4,6 +4,8 @@ import { z } from "zod";
 import { badRequest, escapeRegex, notFound, pageMeta, paginate } from "../../lib/http.js";
 import { requireAuth, requireRole } from "../../middleware/auth.js";
 import { idParams, objectId, validate } from "../../middleware/validate.js";
+import { ClientModel } from "../../models/Client.js";
+import { projectInput, requireCurrentProjectFormat, type ProjectInput } from "./project-input.js";
 import { CategoryModel, ProfileNameModel } from "../../models/Lookup.js";
 import {
   CREDENTIAL_KINDS,
@@ -21,6 +23,7 @@ projectsRouter.use(requireAuth);
 const canEdit = requireRole("operation", "admin");
 
 const populateRefs = [
+  { path: "client", select: "name" },
   { path: "profileName", select: "name" },
   { path: "category", select: "name" },
   { path: "createdBy", select: "name role" },
@@ -42,12 +45,13 @@ projectsRouter.get("/meta", (_req, res) => {
 
 const listQuery = z.object({
   search: z.string().trim().optional(),
+  clientId: objectId.optional(),
   category: objectId.optional(),
   profileName: objectId.optional(),
   serviceLine: z.enum(SERVICE_LINES).optional(),
   tag: z.string().trim().optional(),
   expiring: z.enum(["true", "false"]).optional(),
-  sort: z.enum(["updatedAt", "-updatedAt", "clientName", "-clientName", "createdAt", "-createdAt"]).default("-updatedAt"),
+  sort: z.enum(["updatedAt", "-updatedAt", "clientName", "-clientName", "createdAt", "-createdAt", "name", "-name"]).default("-updatedAt"),
   page: z.coerce.number().int().optional(),
   limit: z.coerce.number().int().optional(),
 });
@@ -57,44 +61,38 @@ projectsRouter.get("/", validate({ query: listQuery }), async (req, res) => {
   const { page, limit, skip } = paginate(q);
 
   const filter: Record<string, unknown> = {};
-  if (q.category) filter.category = q.category;
-  if (q.profileName) filter.profileName = q.profileName;
+  if (q.clientId) filter.client = new Types.ObjectId(q.clientId);
+  if (q.category) filter.category = new Types.ObjectId(q.category);
+  if (q.profileName) filter.profileName = new Types.ObjectId(q.profileName);
   if (q.serviceLine) filter.serviceLine = q.serviceLine;
   if (q.tag) filter.tags = q.tag;
-  if (q.expiring === "true") {
-    filter["resources.expiresAt"] = { $lte: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000) };
-  }
+  if (q.expiring === "true") filter["resources.expiresAt"] = { $lte: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000) };
+  const search: Record<string, unknown> = {};
   if (q.search) {
     const rx = new RegExp(escapeRegex(q.search), "i");
     const [profiles, categories] = await Promise.all([
       ProfileNameModel.find({ name: rx }).distinct("_id"),
       CategoryModel.find({ name: rx }).distinct("_id"),
     ]);
-    filter.$or = [
-      { clientName: rx },
-      { tags: rx },
-      { liveUrl: rx },
-      { "resources.title": rx },
-      { profileName: { $in: profiles } },
-      { category: { $in: categories } },
+    search.$or = [
+      { name: rx }, { clientName: rx }, { tags: rx }, { liveUrl: rx }, { repoUrl: rx },
+      { "liveSites.label": rx }, { "liveSites.url": rx },
+      { "repositories.label": rx }, { "repositories.url": rx },
+      { "resources.title": rx }, { profileName: { $in: profiles } }, { category: { $in: categories } },
     ];
   }
-
   const sortField = q.sort.replace("-", "");
   const sortDir = q.sort.startsWith("-") ? -1 : 1;
-
-  const [rows, total] = await Promise.all([
-    ProjectModel.find(filter)
-      .select("clientName profileName category serviceLine liveUrl tags resources.type resources.template resources.expiresAt updatedBy updatedAt")
-      .populate(populateRefs.filter((p) => p.path !== "createdBy"))
-      .sort({ [sortField]: sortDir, _id: -1 })
-      .skip(skip)
-      .limit(limit)
-      .lean(),
-    ProjectModel.countDocuments(filter),
-  ]);
-
-  res.json({ items: rows.map(serializeProjectRow), meta: pageMeta(total, page, limit) });
+  const [result] = await ProjectModel.aggregate([
+    { $match: filter },
+    { $project: { client: 1, name: 1, clientName: 1, profileName: 1, category: 1, serviceLine: 1, liveUrl: 1, repoUrl: 1, liveSites: 1, repositories: 1, tags: 1, "resources.title": 1, "resources.type": 1, "resources.template": 1, "resources.expiresAt": 1, updatedBy: 1, updatedAt: 1, createdAt: 1 } },
+    { $lookup: { from: "clients", localField: "client", foreignField: "_id", as: "_client", pipeline: [{ $project: { name: 1 } }] } },
+    { $set: { clientName: { $ifNull: [{ $arrayElemAt: ["$_client.name", 0] }, "$clientName"] }, name: { $ifNull: ["$name", "$clientName"] } } },
+    { $match: search },
+    { $facet: { items: [{ $sort: { [sortField]: sortDir, _id: 1 } }, { $skip: skip }, { $limit: limit }], total: [{ $count: "count" }] } },
+  ]).collation({ locale: "en", strength: 2 });
+  const rows = await ProjectModel.populate(result.items, populateRefs.filter(p => p.path !== "createdBy"));
+  res.json({ items: rows.map(serializeProjectRow), meta: pageMeta(result.total[0]?.count ?? 0, page, limit) });
 });
 
 /** Resources whose renewal/expiry date falls within the next N days (or is already past). */
@@ -108,11 +106,13 @@ projectsRouter.get("/expiring", validate({ query: expiringQuery }), async (req, 
     { $match: { "resources.expiresAt": { $ne: null, $lte: until } } },
     { $sort: { "resources.expiresAt": 1 } },
     { $limit: 50 },
+    { $lookup: { from: "clients", localField: "client", foreignField: "_id", as: "_client", pipeline: [{ $project: { name: 1 } }] } },
     {
       $project: {
         _id: 0,
         projectId: { $toString: "$_id" },
-        clientName: 1,
+        clientName: { $ifNull: [{ $arrayElemAt: ["$_client.name", 0] }, "$clientName"] },
+        projectName: { $ifNull: ["$name", "$clientName"] },
         resourceId: { $toString: "$resources._id" },
         resourceTitle: "$resources.title",
         resourceType: "$resources.type",
@@ -141,66 +141,33 @@ projectsRouter.get("/:id", validate({ params: idParams }), async (req, res) => {
 
 // ---------- create / update ----------
 
-const optionalUrl = z
-  .string()
-  .trim()
-  .max(2048)
-  .refine((v) => !v || /^https?:\/\/\S+$/i.test(v), "Must start with http:// or https://")
-  .optional()
-  .default("");
-
-const credentialInput = z.object({
-  label: z.string().trim().min(1, "Field name is required").max(100),
-  value: z.string().max(20_000).default(""),
-  kind: z.enum(CREDENTIAL_KINDS).default("text"),
-});
-
-const resourceInput = z.object({
-  title: z.string().trim().min(1, "Resource name is required").max(120),
-  type: z.enum(RESOURCE_TYPES).default("Other"),
-  template: z.string().trim().max(40).optional(),
-  environment: z.enum(ENVIRONMENTS).default("production"),
-  url: optionalUrl,
-  notes: z.string().max(20_000).optional().default(""),
-  expiresAt: z.coerce.date().nullable().optional(),
-  credentials: z.array(credentialInput).max(100).default([]),
-});
-
-const projectInput = z.object({
-  clientName: z.string().trim().min(1, "Client name is required").max(120),
-  profileName: objectId,
-  category: objectId,
-  serviceLine: z.enum(SERVICE_LINES),
-  liveUrl: optionalUrl,
-  repoUrl: optionalUrl,
-  tags: z.array(z.string().trim().toLowerCase().min(1).max(30)).max(20).default([]),
-  notes: z.string().max(20_000).optional().default(""),
-  resources: z.array(resourceInput).max(100).default([]),
-});
-
-type ProjectInput = z.infer<typeof projectInput>;
-
 async function assertLookups(body: ProjectInput) {
-  const [profile, category] = await Promise.all([
+  const [profile, category, client] = await Promise.all([
     ProfileNameModel.exists({ _id: body.profileName }),
     CategoryModel.exists({ _id: body.category }),
+    ClientModel.exists({ _id: body.clientId }),
   ]);
   const details: Record<string, string[]> = {};
+  if (!client) details.clientId = ["Client no longer exists"];
   if (!profile) details.profileName = ["Profile name no longer exists"];
   if (!category) details.category = ["Category no longer exists"];
   if (Object.keys(details).length) throw badRequest("Validation failed", details);
 }
 
 function toDocument(body: ProjectInput) {
+  const { clientId, ...values } = body;
   return {
-    ...body,
+    ...values,
+    client: clientId,
+    liveUrl: body.liveSites[0]?.url ?? "",
+    repoUrl: body.repositories[0]?.url ?? "",
     tags: [...new Set(body.tags)],
     notes: sealNotes(body.notes),
     resources: sealResources(body.resources),
   };
 }
 
-projectsRouter.post("/", canEdit, validate({ body: projectInput }), async (req, res) => {
+projectsRouter.post("/", canEdit, requireCurrentProjectFormat, validate({ body: projectInput }), async (req, res) => {
   const body = req.valid.body as ProjectInput;
   await assertLookups(body);
   const created = await ProjectModel.create({ ...toDocument(body), createdBy: req.user!._id, updatedBy: req.user!._id });
@@ -208,7 +175,7 @@ projectsRouter.post("/", canEdit, validate({ body: projectInput }), async (req, 
   res.status(201).json({ project: serializeProject(project!) });
 });
 
-projectsRouter.put("/:id", canEdit, validate({ params: idParams, body: projectInput }), async (req, res) => {
+projectsRouter.put("/:id", canEdit, requireCurrentProjectFormat, validate({ params: idParams, body: projectInput }), async (req, res) => {
   const { id } = req.valid.params as { id: string };
   const body = req.valid.body as ProjectInput;
   await assertLookups(body);
@@ -227,7 +194,7 @@ projectsRouter.post("/:id/duplicate", canEdit, validate({ params: idParams }), a
   const { _id, createdAt, updatedAt, ...rest } = source as Record<string, any>;
   const copy = await ProjectModel.create({
     ...rest,
-    clientName: `${source.clientName} (copy)`,
+    name: `${source.name.slice(0, 113)} (copy)`,
     // Fresh sub-document ids; encrypted values are copied as-is.
     resources: source.resources.map(({ _id: _r, ...r }: any) => ({
       ...r,

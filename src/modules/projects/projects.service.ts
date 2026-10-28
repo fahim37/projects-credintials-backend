@@ -37,17 +37,30 @@ export type PlainResource = Omit<ResourceInput, "template" | "url" | "notes" | "
   credentials: (CredentialInput & { id: string })[];
 };
 
+function identity(p: Record<string, any>) {
+  const client = lookupRef(p.client);
+  const liveSites = p.liveSites ?? (p.liveUrl ? [{ label: "Main site", url: p.liveUrl }] : []);
+  const repositories = p.repositories ?? (p.repoUrl ? [{ label: "Main repository", url: p.repoUrl }] : []);
+  return {
+    name: p.name ?? p.clientName ?? "Project",
+    client,
+    clientName: client?.name || p.clientName || "",
+    liveSites: liveSites.map((l: any) => ({ label: l.label, url: l.url })),
+    repositories: repositories.map((l: any) => ({ label: l.label, url: l.url })),
+    liveUrl: liveSites[0]?.url ?? "",
+    repoUrl: repositories[0]?.url ?? "",
+  };
+}
+
 /** Plain JSON for the detail/edit screens, with every secret decrypted. */
 export function serializeProject(doc: ProjectDoc) {
   const p = doc.toObject({ versionKey: false }) as Record<string, any>;
   return {
     id: String(p._id),
-    clientName: p.clientName,
+    ...identity(p),
     profileName: lookupRef(p.profileName),
     category: lookupRef(p.category),
     serviceLine: p.serviceLine,
-    liveUrl: p.liveUrl ?? "",
-    repoUrl: p.repoUrl ?? "",
     tags: p.tags ?? [],
     notes: open(p.notes),
     resources: ((p.resources ?? []) as any[]).map((r): PlainResource => ({
@@ -81,11 +94,10 @@ export function serializeProjectRow(p: Record<string, any>) {
     .filter(Boolean) as number[];
   return {
     id: String(p._id),
-    clientName: p.clientName,
+    ...identity(p),
     profileName: lookupRef(p.profileName),
     category: lookupRef(p.category),
     serviceLine: p.serviceLine,
-    liveUrl: p.liveUrl ?? "",
     tags: p.tags ?? [],
     resourceCount: p.resources?.length ?? 0,
     resourceTypes: [...new Set((p.resources ?? []).map((r: any) => r.template ?? r.type))],
